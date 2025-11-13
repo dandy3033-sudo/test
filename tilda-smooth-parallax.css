@@ -1,0 +1,53 @@
+:root{
+  --smooth-ease: 0.08;
+  --max-stretch: 0.035;
+}
+html,body{
+  height:100%;
+  margin:0;
+  padding:0;
+  background-color:inherit;
+  -webkit-font-smoothing:antialiased;
+  -moz-osx-font-smoothing:grayscale;
+}
+.smooth-scroll-wrapper{
+  position:fixed;
+  top:0;
+  left:0;
+  width:100%;
+  will-change: transform;
+  transform-origin: center top;
+  -webkit-backface-visibility: hidden;
+  backface-visibility: hidden;
+}
+.smooth-scroll-placeholder{
+  width:1px;
+  opacity:0;
+}
+.parallax{
+  will-change: transform;
+  transform: translate3d(0,0,0);
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+}
+img.parallax, .parallax img {
+  display:block;
+  max-width:100%;
+  height:auto;
+  pointer-events:none;
+}
+.no-smoothscroll .smooth-scroll-wrapper{
+  position:static !important;
+  transform:none !important;
+}
+.no-smoothscroll body{
+  overflow:auto !important;
+}
+.smooth-fixed-exclude{
+  position:fixed !important;
+  top:0;
+  left:0;
+  width:100%;
+  z-index:9999;
+  pointer-events:auto;
+}
