@@ -1,63 +1,61 @@
+// Версия: добавляет уменьшение (negative scale) изображений внутри масок при скролле
 (function () {
   'use strict';
 
-  // Параметры — при необходимости измените
+  // Параметры (можно тонко подстроить)
   const MIN_WIDTH = 780;
   const TOUCH_DETECTED = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
   const EASE = 0.08;
   const MAX_STRETCH = 0.035;
-  const DEFAULT_PARALLAX_SPEED = 0.12;
-  const MIN_IMAGE_WIDTH = 180; // минимальная naturalWidth чтобы применять параллакс
-  const MIN_IMAGE_HEIGHT = 80; // минимальная naturalHeight чтобы применять параллакс
+  const DEFAULT_INTENSITY = 0.06; // максимально уменьшение масштаба (0.06 => scale до 0.94)
+  const MIN_IMAGE_WIDTH = 80;
+  const MIN_IMAGE_HEIGHT = 40;
 
   const enableSmooth = !TOUCH_DETECTED && window.innerWidth >= MIN_WIDTH;
 
   document.addEventListener('DOMContentLoaded', function () {
     if (!enableSmooth) {
-      console.info('SmoothScroll: disabled for touch or narrow screen');
       document.documentElement.classList.add('no-smoothscroll');
-      initSimpleParallax();
+      initSimpleScaleFallback();
       return;
     }
 
     try {
-      initSmoothScroller();
+      initSmoothScrollerWithScale();
     } catch (err) {
       console.error('SmoothScroll init error:', err);
       document.documentElement.classList.add('no-smoothscroll');
-      initSimpleParallax();
+      initSimpleScaleFallback();
     }
   });
 
-  // Простая версия параллакса на нативном скролле (fallback)
-  function initSimpleParallax() {
-    function apply() {
-      const items = collectParallaxItems();
-      const scrollY = window.scrollY || window.pageYOffset;
-      items.forEach(item => {
-        const offset = scrollY * item.speed;
-        if (item.type === 'img') {
-          item.el.style.transform = `translate3d(0, ${offset}px, 0)`;
-        } else if (item.type === 'bg') {
-          item.el.style.backgroundPosition = `center ${-offset}px`;
-        }
-      });
+  // ----------------------------
+  // Fallback — нативный скролл: применяем scale к картинкам в масках
+  // ----------------------------
+  function initSimpleScaleFallback() {
+    const items = collectScaleItems();
+    if (!items.length) return;
+    function onScroll() {
+      requestAnimationFrame(() => applyScaleToItems(items));
     }
-    window.addEventListener('scroll', () => requestAnimationFrame(apply), { passive: true });
-    apply();
+    window.addEventListener('scroll', onScroll, { passive: true });
+    window.addEventListener('resize', () => applyScaleToItems(items));
+    applyScaleToItems(items);
+    console.info('SimpleScaleFallback: initialized, items:', items.length);
   }
 
-  // ===========================
-  // Автоматический smooth scroller + авто-подбор изображений
-  // ===========================
-  function initSmoothScroller() {
-    console.info('SmoothScroll: initializing (auto-parallax images)');
+  // ----------------------------
+  // Основной smooth scroller (оставляем логику скролла) + scale application
+  // ----------------------------
+  function initSmoothScrollerWithScale() {
     const body = document.body;
     if (document.querySelector('.smooth-scroll-wrapper')) {
-      console.warn('SmoothScroll: already initialized');
+      // уже инициализирован — добавим только scale-логику в RAF
+      attachScaleToExistingLoop();
       return;
     }
 
+    // Создаём wrapper и placeholder (как раньше)
     const wrapper = document.createElement('div');
     wrapper.className = 'smooth-scroll-wrapper';
     wrapper.style.willChange = 'transform';
@@ -68,14 +66,11 @@
     placeholder.style.width = '1px';
     placeholder.style.opacity = '0';
 
-    // Переносим содержимое в wrapper
-    while (body.firstChild) {
-      wrapper.appendChild(body.firstChild);
-    }
+    while (body.firstChild) wrapper.appendChild(body.firstChild);
     body.appendChild(wrapper);
     body.appendChild(placeholder);
 
-    // Попытка вынести фиксированные элементы
+    // вынесение фиксированных элементов (best-effort)
     setTimeout(() => {
       try {
         const allInside = Array.from(wrapper.querySelectorAll('*'));
@@ -99,7 +94,7 @@
     }
     updateBodyHeight();
 
-    // Обсерверы для обновления высоты и списка элементов
+    // observers для высоты
     let ro;
     if ('ResizeObserver' in window) {
       ro = new ResizeObserver(() => updateBodyHeight());
@@ -109,128 +104,71 @@
     }
 
     const mo = new MutationObserver((mutations) => {
-      let changed = false;
-      for (const m of mutations) {
-        if (m.addedNodes && m.addedNodes.length) changed = true;
-      }
-      if (changed) {
-        setTimeout(() => {
-          try { updateBodyHeight(); } catch (e) { /* ignore */ }
-        }, 80);
+      if (mutations.some(m => m.addedNodes && m.addedNodes.length)) {
+        setTimeout(updateBodyHeight, 80);
+        cachedScaleItems = collectScaleItems();
       }
     });
     mo.observe(wrapper, { childList: true, subtree: true });
 
-    // Обработчик загрузки изображений — чтобы корректно считать naturalWidth
-    const imgsOnPage = () => Array.from(wrapper.querySelectorAll('img'));
-    imgsOnPage().forEach(img => {
+    // image load handlers
+    Array.from(wrapper.querySelectorAll('img')).forEach(img => {
       if (!img.complete) {
         img.addEventListener('load', updateBodyHeight, { once: true });
         img.addEventListener('error', updateBodyHeight, { once: true });
       }
     });
 
-    // Скролл параметры
+    // scroll state
     let targetScroll = window.scrollY || window.pageYOffset || 0;
     let currentScroll = targetScroll;
     let lastScroll = targetScroll;
     let velocity = 0;
 
-    // Собираем элементы параллакса динамически
-    function collectParallaxItems() {
-      const items = [];
-
-      // 1) Все <img>, фильтруем мелкие/иконки и те, что явно отключены
-      const imgs = Array.from(wrapper.querySelectorAll('img'));
-      imgs.forEach(img => {
-        if (img.closest('.no-parallax')) return; // opt-out by class
-        if (img.dataset.parallax === 'false' || img.getAttribute('data-parallax') === 'false') return;
-        const w = img.naturalWidth || img.width || 0;
-        const h = img.naturalHeight || img.height || 0;
-        // если естественных размеров нет (ленивая загрузка), временно включаем и ждём load
-        if (w && h) {
-          if (w < MIN_IMAGE_WIDTH || h < MIN_IMAGE_HEIGHT) return;
-        } else {
-          // если изображение ещё не загружено — добавим, но пометим как проверяемое
-        }
-        const speed = parseFloat(img.dataset.parallaxSpeed || img.getAttribute('data-parallax-speed')) || DEFAULT_PARALLAX_SPEED;
-        img.style.willChange = 'transform';
-        items.push({ el: img, speed: speed, type: 'img' });
-      });
-
-      // 2) Элементы с background-image и явной меткой data-parallax-bg (опционально)
-      const bgCandidates = Array.from(wrapper.querySelectorAll('[data-parallax-bg]'));
-      bgCandidates.forEach(el => {
-        if (el.closest('.no-parallax')) return;
-        const cs = window.getComputedStyle(el);
-        if (!cs.backgroundImage || cs.backgroundImage === 'none') return;
-        const speed = parseFloat(el.dataset.parallaxSpeed || DEFAULT_PARALLAX_SPEED);
-        el.style.willChange = 'background-position';
-        items.push({ el: el, speed: speed, type: 'bg' });
-      });
-
-      return items;
-    }
-
-    // Helpers
-    function getMaxScroll() {
-      return Math.max(0, placeholder.getBoundingClientRect().height - window.innerHeight);
-    }
-    function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
-
-    // Обработка wheel/touch/keys
-    window.addEventListener('wheel', function (e) {
+    // события управления скроллом (wheel, keys)
+    window.addEventListener('wheel', e => {
       targetScroll += e.deltaY;
       targetScroll = clamp(targetScroll, 0, getMaxScroll());
     }, { passive: true });
 
-    window.addEventListener('touchstart', function () {
+    window.addEventListener('touchstart', () => {
       targetScroll = clamp(window.scrollY || window.pageYOffset || 0, 0, getMaxScroll());
     }, { passive: true });
 
-    window.addEventListener('hashchange', function () {
+    window.addEventListener('hashchange', () => {
       targetScroll = clamp(window.scrollY || window.pageYOffset || 0, 0, getMaxScroll());
     });
 
-    window.addEventListener('keydown', function (e) {
+    window.addEventListener('keydown', e => {
       const step = window.innerHeight * 0.9;
       switch (e.key) {
-        case 'PageDown':
-          targetScroll = clamp(targetScroll + step, 0, getMaxScroll()); break;
-        case 'PageUp':
-          targetScroll = clamp(targetScroll - step, 0, getMaxScroll()); break;
-        case 'End':
-          targetScroll = getMaxScroll(); break;
-        case 'Home':
-          targetScroll = 0; break;
-        case 'ArrowDown':
-          targetScroll = clamp(targetScroll + 40, 0, getMaxScroll()); break;
-        case 'ArrowUp':
-          targetScroll = clamp(targetScroll - 40, 0, getMaxScroll()); break;
+        case 'PageDown': targetScroll = clamp(targetScroll + step, 0, getMaxScroll()); break;
+        case 'PageUp': targetScroll = clamp(targetScroll - step, 0, getMaxScroll()); break;
+        case 'End': targetScroll = getMaxScroll(); break;
+        case 'Home': targetScroll = 0; break;
+        case 'ArrowDown': targetScroll = clamp(targetScroll + 40, 0, getMaxScroll()); break;
+        case 'ArrowUp': targetScroll = clamp(targetScroll - 40, 0, getMaxScroll()); break;
         default: return;
       }
       e.preventDefault && e.preventDefault();
     }, false);
 
-    // Синхронизация с нативным scroll (на случай внешних вызовов)
-    const externalMonitor = setInterval(function () {
+    const externalMonitor = setInterval(() => {
       const nativeScroll = window.scrollY || window.pageYOffset || 0;
       if (Math.abs(nativeScroll - targetScroll) > 2) {
         targetScroll = clamp(nativeScroll, 0, getMaxScroll());
       }
     }, 450);
 
-    // RAF loop
+    // RAF loop (основной)
     let rafId;
     let scaleCurrent = 1;
-
-    // Кэшируем элементы, но обновляем при изменениях
-    let cachedParallaxItems = collectParallaxItems();
+    // кэш элементов для scale
+    let cachedScaleItems = collectScaleItems();
     let lastCollectAt = Date.now();
-    function maybeRefreshCollection() {
-      // обновляем не чаще чем 300ms, но также при DOM изменениях через MutationObserver
+    function maybeRefreshScaleCollection() {
       if (Date.now() - lastCollectAt > 300) {
-        cachedParallaxItems = collectParallaxItems();
+        cachedScaleItems = collectScaleItems();
         lastCollectAt = Date.now();
       }
     }
@@ -240,47 +178,21 @@
       velocity = currentScroll - lastScroll;
       lastScroll = currentScroll;
 
+      // вертикальная растяжка (как раньше)
       const desiredStretch = Math.min(MAX_STRETCH, Math.abs(velocity) * 0.00042);
       const desiredScale = 1 + desiredStretch;
       scaleCurrent += (desiredScale - scaleCurrent) * EASE;
 
       wrapper.style.transform = `translate3d(0,${-currentScroll}px,0) scaleY(${scaleCurrent})`;
 
-      // Обновляем список иногда
-      maybeRefreshCollection();
-
-      // Применяем параллакс к каждому найденному элементу
-      if (cachedParallaxItems.length) {
-        cachedParallaxItems.forEach(item => {
-          const parallaxOffset = currentScroll * item.speed;
-          if (item.type === 'img') {
-            // translate img
-            item.el.style.transform = `translate3d(0, ${parallaxOffset}px, 0)`;
-          } else if (item.type === 'bg') {
-            // move background-position (можно инвертировать знак при желании)
-            item.el.style.backgroundPosition = `center ${-parallaxOffset}px`;
-          }
-        });
-      }
+      // scale items update
+      maybeRefreshScaleCollection();
+      applyScaleToItems(cachedScaleItems);
 
       rafId = requestAnimationFrame(rafLoop);
     }
 
-    // Наблюдатель за DOM, чтобы обновлять список при добавлении картинок/блоков
-    const localMo = new MutationObserver((mutations) => {
-      let changed = false;
-      for (const m of mutations) {
-        if (m.addedNodes && m.addedNodes.length) changed = true;
-      }
-      if (changed) {
-        cachedParallaxItems = collectParallaxItems();
-        lastCollectAt = Date.now();
-        updateBodyHeight();
-      }
-    });
-    localMo.observe(wrapper, { childList: true, subtree: true });
-
-    // Начальная синхронизация
+    // старт
     const initialScroll = window.scrollY || window.pageYOffset || 0;
     targetScroll = initialScroll;
     currentScroll = initialScroll;
@@ -288,20 +200,128 @@
 
     setTimeout(() => {
       updateBodyHeight();
-      cachedParallaxItems = collectParallaxItems();
+      cachedScaleItems = collectScaleItems();
       rafId = requestAnimationFrame(rafLoop);
-      console.info('SmoothScroll+AutoParallax: started. Parallax items count:', cachedParallaxItems.length);
+      console.info('SmoothScroll+Scale: started. Scalable items:', cachedScaleItems.length);
     }, 60);
 
-    // Очистка при уходе со страницы
-    window.addEventListener('beforeunload', function () {
+    // cleanup
+    window.addEventListener('beforeunload', () => {
       cancelAnimationFrame(rafId);
       clearInterval(externalMonitor);
       if (ro && ro.disconnect) ro.disconnect();
       mo.disconnect();
-      localMo.disconnect();
     });
 
-  } // конец initSmoothScroller
+    // helpers
+    function getMaxScroll() { return Math.max(0, placeholder.getBoundingClientRect().height - window.innerHeight); }
+    function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+  } // end initSmoothScrollerWithScale
+
+  // ----------------------------
+  // Сбор изображений внутри масок (маска = ancestor с overflow:hidden/clip и ненулевая высота)
+  // ----------------------------
+  function collectScaleItems() {
+    const items = [];
+    const imgs = Array.from(document.querySelectorAll('img'));
+    imgs.forEach(img => {
+      // opt-out
+      if (img.dataset.parallax === 'false' || img.classList.contains('no-parallax') || img.classList.contains('no-parallax-scale')) return;
+      // ищем маску-родителя
+      const mask = findMaskAncestor(img);
+      if (!mask) return;
+      // фильтры размеров
+      const w = img.naturalWidth || img.width || 0;
+      const h = img.naturalHeight || img.height || 0;
+      if ((w && w < MIN_IMAGE_WIDTH) || (h && h < MIN_IMAGE_HEIGHT)) return;
+      // intensity per image
+      const intensity = parseFloat(img.dataset.parallaxIntensity) || DEFAULT_INTENSITY;
+      // подготовка изображения: cover, 100% размера маски
+      setupImageForMask(img, mask);
+      items.push({ el: img, mask: mask, intensity: intensity });
+    });
+    return items;
+  }
+
+  function findMaskAncestor(el) {
+    let node = el.parentElement;
+    while (node && node !== document.body) {
+      const cs = window.getComputedStyle(node);
+      const overflowHidden = (cs.overflow && (cs.overflow.indexOf('hidden') !== -1 || cs.overflow.indexOf('clip') !== -1)) ||
+                             (cs.overflowX && cs.overflowX.indexOf('hidden') !== -1) ||
+                             (cs.overflowY && cs.overflowY.indexOf('hidden') !== -1);
+      if (overflowHidden && node.clientHeight > 0) return node;
+      node = node.parentElement;
+    }
+    return null;
+  }
+
+  function setupImageForMask(img, mask) {
+    // Устанавливаем объектно-ориентированное покрытие, чтобы масштабирование не ломало layout
+    img.style.width = '100%';
+    img.style.height = '100%';
+    img.style.objectFit = 'cover';
+    img.style.display = 'block';
+    img.style.willChange = 'transform';
+    // страхуем overflow у маски
+    if (!mask.style.overflow) mask.style.overflow = 'hidden';
+  }
+
+  // ----------------------------
+  // Применение scale: уменьшение изображения ближе к центру вьюпорта
+  // ----------------------------
+  function applyScaleToItems(items) {
+    if (!items || !items.length) return;
+    const viewportHeight = window.innerHeight;
+    const viewportCenterY = viewportHeight / 2;
+
+    items.forEach(item => {
+      try {
+        const rect = item.mask.getBoundingClientRect();
+        const maskCenterY = rect.top + rect.height / 2;
+        const dist = Math.abs(maskCenterY - viewportCenterY);
+        const norm = clamp(dist / viewportCenterY, 0, 1); // 0 в центре, 1 далеко
+        const centerFactor = 1 - norm; // 1 в центре
+        const scale = 1 - (item.intensity * centerFactor); // уменьшаем до 1-intensity в центре
+
+        // хотим сохранить существующий translateX/translateY, если они уже есть в transform
+        const existing = window.getComputedStyle(item.el).transform;
+        const { tx, ty } = parseTranslate(existing);
+        // устанавливаем комбинированный transform (translate + scale)
+        item.el.style.transform = `translate3d(${tx}px, ${ty}px, 0) scale(${scale})`;
+      } catch (e) {
+        // игнорируем отдельные ошибки
+      }
+    });
+  }
+
+  // Парсинг translate из строки transform (matrix / matrix3d / none)
+  function parseTranslate(transformStr) {
+    // default
+    let tx = 0, ty = 0;
+    if (!transformStr || transformStr === 'none') return { tx, ty };
+    try {
+      const m = transformStr.replace(/\s+/g, '');
+      if (m.startsWith('matrix3d(')) {
+        // matrix3d(a1..a16) — tx = a13? a12? Actually in matrix3d tx = 13th value (index 12), ty = 14th (index 13)
+        const vals = m.slice(9, -1).split(',').map(Number);
+        tx = vals[12] || 0;
+        ty = vals[13] || 0;
+      } else if (m.startsWith('matrix(')) {
+        // matrix(a, b, c, d, tx, ty)
+        const vals = m.slice(7, -1).split(',').map(Number);
+        tx = vals[4] || 0;
+        ty = vals[5] || 0;
+      }
+    } catch (e) {
+      // ignore parsing errors
+    }
+    return { tx, ty };
+  }
+
+  // ----------------------------
+  // Утилиты
+  // ----------------------------
+  function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
 
 })();
