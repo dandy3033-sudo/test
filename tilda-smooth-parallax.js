@@ -1,13 +1,15 @@
-// Версия: добавляет уменьшение (negative scale) изображений внутри масок при скролле
+// tilda-smooth-parallax.js
+// Исправленная версия: фиксирует "прыжок" при создании wrapper и автоматически уменьшает (negative scale)
+// изображения внутри масок при прокрутке. Opt-out: data-parallax="false" или class="no-parallax-scale".
 (function () {
   'use strict';
 
-  // Параметры (можно тонко подстроить)
+  // Настройки
   const MIN_WIDTH = 780;
   const TOUCH_DETECTED = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
   const EASE = 0.08;
   const MAX_STRETCH = 0.035;
-  const DEFAULT_INTENSITY = 0.06; // максимально уменьшение масштаба (0.06 => scale до 0.94)
+  const DEFAULT_INTENSITY = 0.06; // максимальное уменьшение (0.06 => scale до 0.94)
   const MIN_IMAGE_WIDTH = 80;
   const MIN_IMAGE_HEIGHT = 40;
 
@@ -29,9 +31,7 @@
     }
   });
 
-  // ----------------------------
-  // Fallback — нативный скролл: применяем scale к картинкам в масках
-  // ----------------------------
+  // ============= fallback (нативный скролл) ============
   function initSimpleScaleFallback() {
     const items = collectScaleItems();
     if (!items.length) return;
@@ -44,18 +44,20 @@
     console.info('SimpleScaleFallback: initialized, items:', items.length);
   }
 
-  // ----------------------------
-  // Основной smooth scroller (оставляем логику скролла) + scale application
-  // ----------------------------
+  // ============= основной smooth scroller + scale ============
   function initSmoothScrollerWithScale() {
     const body = document.body;
+
+    // сохраняем исходную нативную прокрутку до изменений
+    const initialNativeScroll = window.scrollY || window.pageYOffset || 0;
+
+    // Если wrapper уже есть — просто прикрепляем scale-логику к существующему циклу
     if (document.querySelector('.smooth-scroll-wrapper')) {
-      // уже инициализирован — добавим только scale-логику в RAF
       attachScaleToExistingLoop();
       return;
     }
 
-    // Создаём wrapper и placeholder (как раньше)
+    // Создаём wrapper и placeholder
     const wrapper = document.createElement('div');
     wrapper.className = 'smooth-scroll-wrapper';
     wrapper.style.willChange = 'transform';
@@ -66,11 +68,25 @@
     placeholder.style.width = '1px';
     placeholder.style.opacity = '0';
 
-    while (body.firstChild) wrapper.appendChild(body.firstChild);
+    // Переносим содержимое в wrapper
+    while (body.firstChild) {
+      wrapper.appendChild(body.firstChild);
+    }
     body.appendChild(wrapper);
     body.appendChild(placeholder);
 
-    // вынесение фиксированных элементов (best-effort)
+    // Обновляем высоту placeholder сразу (чтобы избежать кратковременных несоответствий)
+    function updateBodyHeightNow() {
+      // если контент ещё не полностью загружен, попробуем взять максимальную из scrollHeight и bounding
+      const contentHeight = Math.max(wrapper.scrollHeight || 0, wrapper.getBoundingClientRect().height || 0);
+      placeholder.style.height = contentHeight + 'px';
+    }
+    updateBodyHeightNow();
+
+    // установить wrapper так, чтобы визуальное положение осталось тем же (избегаем "прыжка")
+    wrapper.style.transform = `translate3d(0,${-initialNativeScroll}px,0)`;
+
+    // Попытка вынести fixed элементы (best-effort)
     setTimeout(() => {
       try {
         const allInside = Array.from(wrapper.querySelectorAll('*'));
@@ -88,24 +104,18 @@
       }
     }, 50);
 
-    function updateBodyHeight() {
-      const contentHeight = Math.max(0, wrapper.getBoundingClientRect().height);
-      placeholder.style.height = contentHeight + 'px';
-    }
-    updateBodyHeight();
-
-    // observers для высоты
+    // Observers и обновления высоты
     let ro;
     if ('ResizeObserver' in window) {
-      ro = new ResizeObserver(() => updateBodyHeight());
+      ro = new ResizeObserver(() => updateBodyHeightNow());
       try { ro.observe(wrapper); } catch (e) { /* ignore */ }
     } else {
-      window.addEventListener('resize', updateBodyHeight);
+      window.addEventListener('resize', updateBodyHeightNow);
     }
 
     const mo = new MutationObserver((mutations) => {
       if (mutations.some(m => m.addedNodes && m.addedNodes.length)) {
-        setTimeout(updateBodyHeight, 80);
+        setTimeout(updateBodyHeightNow, 80);
         cachedScaleItems = collectScaleItems();
       }
     });
@@ -114,18 +124,18 @@
     // image load handlers
     Array.from(wrapper.querySelectorAll('img')).forEach(img => {
       if (!img.complete) {
-        img.addEventListener('load', updateBodyHeight, { once: true });
-        img.addEventListener('error', updateBodyHeight, { once: true });
+        img.addEventListener('load', updateBodyHeightNow, { once: true });
+        img.addEventListener('error', updateBodyHeightNow, { once: true });
       }
     });
 
-    // scroll state
-    let targetScroll = window.scrollY || window.pageYOffset || 0;
-    let currentScroll = targetScroll;
-    let lastScroll = targetScroll;
+    // Скролл состояние
+    let targetScroll = initialNativeScroll;
+    let currentScroll = initialNativeScroll;
+    let lastScroll = initialNativeScroll;
     let velocity = 0;
 
-    // события управления скроллом (wheel, keys)
+    // Слушатели скролла (wheel/keys/touch)
     window.addEventListener('wheel', e => {
       targetScroll += e.deltaY;
       targetScroll = clamp(targetScroll, 0, getMaxScroll());
@@ -160,10 +170,11 @@
       }
     }, 450);
 
-    // RAF loop (основной)
+    // RAF loop
     let rafId;
     let scaleCurrent = 1;
-    // кэш элементов для scale
+
+    // Кешируем элементы для scale
     let cachedScaleItems = collectScaleItems();
     let lastCollectAt = Date.now();
     function maybeRefreshScaleCollection() {
@@ -178,14 +189,13 @@
       velocity = currentScroll - lastScroll;
       lastScroll = currentScroll;
 
-      // вертикальная растяжка (как раньше)
+      // вертикальная растяжка страницы (как раньше)
       const desiredStretch = Math.min(MAX_STRETCH, Math.abs(velocity) * 0.00042);
       const desiredScale = 1 + desiredStretch;
       scaleCurrent += (desiredScale - scaleCurrent) * EASE;
 
       wrapper.style.transform = `translate3d(0,${-currentScroll}px,0) scaleY(${scaleCurrent})`;
 
-      // scale items update
       maybeRefreshScaleCollection();
       applyScaleToItems(cachedScaleItems);
 
@@ -193,19 +203,14 @@
     }
 
     // старт
-    const initialScroll = window.scrollY || window.pageYOffset || 0;
-    targetScroll = initialScroll;
-    currentScroll = initialScroll;
-    lastScroll = initialScroll;
-
     setTimeout(() => {
-      updateBodyHeight();
+      updateBodyHeightNow();
       cachedScaleItems = collectScaleItems();
       rafId = requestAnimationFrame(rafLoop);
       console.info('SmoothScroll+Scale: started. Scalable items:', cachedScaleItems.length);
     }, 60);
 
-    // cleanup
+    // очистка
     window.addEventListener('beforeunload', () => {
       cancelAnimationFrame(rafId);
       clearInterval(externalMonitor);
@@ -213,44 +218,78 @@
       mo.disconnect();
     });
 
-    // helpers
+    // хелперы
     function getMaxScroll() { return Math.max(0, placeholder.getBoundingClientRect().height - window.innerHeight); }
     function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
   } // end initSmoothScrollerWithScale
 
-  // ----------------------------
-  // Сбор изображений внутри масок (маска = ancestor с overflow:hidden/clip и ненулевая высота)
-  // ----------------------------
+  // Если wrapper уже был инициализирован раньше (редкий кейс), прикрепим scale к существующему циклу
+  function attachScaleToExistingLoop() {
+    // соберём элементы и применим в RAF параллельно (простая реализация)
+    let cachedScaleItems = collectScaleItems();
+    let lastCollectAt = Date.now();
+    function maybeRefresh() {
+      if (Date.now() - lastCollectAt > 300) {
+        cachedScaleItems = collectScaleItems();
+        lastCollectAt = Date.now();
+      }
+    }
+    function loop() {
+      maybeRefresh();
+      applyScaleToItems(cachedScaleItems);
+      requestAnimationFrame(loop);
+    }
+    loop();
+  }
+
+  // -------------------------------
+  // Собираем изображения, которые находятся внутри "масок"
+  // Маска: ancestor с overflow:hidden/clip или имеет data-parallax-mask / класс parallax-mask,
+  // либо ancestor с фиксированной высотой (clientHeight>0) — это расширенное обнаружение для Tilda.
+  // -------------------------------
   function collectScaleItems() {
     const items = [];
     const imgs = Array.from(document.querySelectorAll('img'));
     imgs.forEach(img => {
       // opt-out
-      if (img.dataset.parallax === 'false' || img.classList.contains('no-parallax') || img.classList.contains('no-parallax-scale')) return;
-      // ищем маску-родителя
-      const mask = findMaskAncestor(img);
+      if (img.dataset.parallax === 'false' || img.classList.contains('no-parallax-scale') || img.classList.contains('no-parallax')) return;
+
+      // найдем маску: сначала по явной метке, затем по overflow:hidden, затем по фикс.высоте
+      const mask = findMaskAncestorExtended(img);
       if (!mask) return;
-      // фильтры размеров
+
       const w = img.naturalWidth || img.width || 0;
       const h = img.naturalHeight || img.height || 0;
       if ((w && w < MIN_IMAGE_WIDTH) || (h && h < MIN_IMAGE_HEIGHT)) return;
-      // intensity per image
+
       const intensity = parseFloat(img.dataset.parallaxIntensity) || DEFAULT_INTENSITY;
-      // подготовка изображения: cover, 100% размера маски
       setupImageForMask(img, mask);
       items.push({ el: img, mask: mask, intensity: intensity });
     });
     return items;
   }
 
-  function findMaskAncestor(el) {
+  // расширенный поиск маски
+  function findMaskAncestorExtended(el) {
     let node = el.parentElement;
     while (node && node !== document.body) {
       const cs = window.getComputedStyle(node);
+      // явная метка
+      if (node.hasAttribute('data-parallax-mask') || node.classList.contains('parallax-mask') || node.classList.contains('t-parallax-mask')) {
+        return node;
+      }
       const overflowHidden = (cs.overflow && (cs.overflow.indexOf('hidden') !== -1 || cs.overflow.indexOf('clip') !== -1)) ||
                              (cs.overflowX && cs.overflowX.indexOf('hidden') !== -1) ||
                              (cs.overflowY && cs.overflowY.indexOf('hidden') !== -1);
       if (overflowHidden && node.clientHeight > 0) return node;
+
+      // если элемент имеет явную (не auto) высоту — считаем его возможной маской (Tilda часто задаёт высоту блоку)
+      const heightStr = cs.height || '';
+      if (node.clientHeight > 0 && heightStr && heightStr !== 'auto' && heightStr !== '0px') {
+        // безопасно установить overflow:hidden если в будущем нужен строгий контейнер
+        // но не меняем стили, если это явно не нужно
+        return node;
+      }
       node = node.parentElement;
     }
     return null;
@@ -258,18 +297,22 @@
 
   function setupImageForMask(img, mask) {
     // Устанавливаем объектно-ориентированное покрытие, чтобы масштабирование не ломало layout
-    img.style.width = '100%';
-    img.style.height = '100%';
-    img.style.objectFit = 'cover';
-    img.style.display = 'block';
-    img.style.willChange = 'transform';
-    // страхуем overflow у маски
-    if (!mask.style.overflow) mask.style.overflow = 'hidden';
+    // НЕ меняем размер mask, только img
+    try {
+      img.style.width = '100%';
+      img.style.height = '100%';
+      img.style.objectFit = 'cover';
+      img.style.display = 'block';
+      img.style.willChange = 'transform';
+      // безопасно выставить overflow у маски, если оно не задано
+      const cs = mask.style;
+      if (!cs.overflow) mask.style.overflow = 'hidden';
+    } catch (e) {
+      // ignore
+    }
   }
 
-  // ----------------------------
-  // Применение scale: уменьшение изображения ближе к центру вьюпорта
-  // ----------------------------
+  // Применяем уменьшение (negative scale) изображений: ближе к центру экрана — меньший scale
   function applyScaleToItems(items) {
     if (!items || !items.length) return;
     const viewportHeight = window.innerHeight;
@@ -284,44 +327,36 @@
         const centerFactor = 1 - norm; // 1 в центре
         const scale = 1 - (item.intensity * centerFactor); // уменьшаем до 1-intensity в центре
 
-        // хотим сохранить существующий translateX/translateY, если они уже есть в transform
+        // если на элементе уже есть translate, попытаемся сохранить translate
         const existing = window.getComputedStyle(item.el).transform;
         const { tx, ty } = parseTranslate(existing);
-        // устанавливаем комбинированный transform (translate + scale)
         item.el.style.transform = `translate3d(${tx}px, ${ty}px, 0) scale(${scale})`;
       } catch (e) {
-        // игнорируем отдельные ошибки
+        // ignore per-item
       }
     });
   }
 
-  // Парсинг translate из строки transform (matrix / matrix3d / none)
+  // Парсинг translate из matrix / matrix3d
   function parseTranslate(transformStr) {
-    // default
     let tx = 0, ty = 0;
     if (!transformStr || transformStr === 'none') return { tx, ty };
     try {
       const m = transformStr.replace(/\s+/g, '');
       if (m.startsWith('matrix3d(')) {
-        // matrix3d(a1..a16) — tx = a13? a12? Actually in matrix3d tx = 13th value (index 12), ty = 14th (index 13)
         const vals = m.slice(9, -1).split(',').map(Number);
         tx = vals[12] || 0;
         ty = vals[13] || 0;
       } else if (m.startsWith('matrix(')) {
-        // matrix(a, b, c, d, tx, ty)
         const vals = m.slice(7, -1).split(',').map(Number);
         tx = vals[4] || 0;
         ty = vals[5] || 0;
       }
-    } catch (e) {
-      // ignore parsing errors
-    }
+    } catch (e) { /* ignore */ }
     return { tx, ty };
   }
 
-  // ----------------------------
-  // Утилиты
-  // ----------------------------
+  // утилиты
   function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
 
 })();
