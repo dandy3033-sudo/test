@@ -1,5 +1,5 @@
 /**
- * t123 Smooth "Heavy" Scroll + Horizontal Stretch (wrapper-based, safe)
+ * t123 Smooth "Heavy" Scroll + + Horizontal Stretch (wrapper-based, safe)
  * Added: robust handlers for zoom/ctrl+wheel/visualViewport resizing so layout
  * recalculates on zoom and doesn't leave the grid broken.
  */
