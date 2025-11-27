@@ -1,0 +1,157 @@
+/**
+ * t123 Smooth "Heavy" Scroll + Horizontal Stretch
+ * - Safe for Tilda: waits for window.load, progressive enhancement.
+ * - Targets .t123 (falls back to .t-records or document.body).
+ * - Public API: window.__t123SmoothScroll.disable() / .enable()
+ *
+ * Настройки внутри файла: EASE, STRETCH_FACTOR, MAX_STRETCH — подгоняйте под вкус.
+ */
+(function () {
+  if (window.__t123SmoothScroll) {
+    console.warn('t123 Smooth Scroll already active');
+    return;
+  }
+
+  // Run after page load to be safe on Tilda
+  window.addEventListener('load', function () {
+    if (window.__t123SmoothScroll) return;
+    window.__t123SmoothScroll = true;
+
+    // Config - tweak to taste
+    const EASE = 0.08;             // interpolation factor (lower = heavier / longer inertia)
+    const STRETCH_FACTOR = 0.0015; // multiplier from velocity to scaleX amount
+    const MAX_STRETCH = 0.12;      // max extra scaleX (12% max stretch)
+    const RETURN_DAMPING = 0.08;   // how fast scale returns to 1
+    const RAF = window.requestAnimationFrame || window.webkitRequestAnimationFrame || function (fn) { return setTimeout(fn, 16); };
+
+    // Select content element (order of preference)
+    const content = document.querySelector('.t123') || document.querySelector('.t-records') || document.body;
+    if (!content) {
+      console.warn('t123 Smooth Scroll: no suitable content element found — aborting');
+      return;
+    }
+
+    // Save original inline styles to restore if disabled
+    const original = {
+      bodyHeight: document.body.style.height || '',
+      contentPosition: content.style.position || '',
+      contentTop: content.style.top || '',
+      contentLeft: content.style.left || '',
+      contentWidth: content.style.width || '',
+      contentWillChange: content.style.willChange || '',
+      contentTransformOrigin: content.style.transformOrigin || ''
+    };
+
+    let enabled = true;
+
+    function refreshLayout() {
+      // measure full content height
+      const fullHeight = (content === document.body) ? Math.max(document.body.scrollHeight, document.documentElement.scrollHeight) : Math.ceil(content.offsetHeight);
+      // set spacer height on body so native scrollbar works
+      document.body.style.height = fullHeight + 'px';
+      // fix content in place
+      content.style.position = 'fixed';
+      content.style.top = '0px';
+      content.style.left = '0px';
+      content.style.width = '100%';
+      content.style.willChange = 'transform';
+      content.style.transformOrigin = '50% 50%';
+    }
+
+    // initial layout
+    refreshLayout();
+
+    // smoothing state
+    let targetY = window.scrollY || window.pageYOffset;
+    let currentY = targetY;
+    let lastY = targetY;
+    let scaleX = 1;
+
+    function loop() {
+      if (!enabled) return;
+
+      targetY = window.scrollY || window.pageYOffset;
+      // interpolate toward target
+      currentY += (targetY - currentY) * EASE;
+
+      // velocity in px/frame
+      const velocity = (currentY - lastY);
+      lastY = currentY;
+
+      // compute stretch based on velocity
+      let stretch = Math.min(MAX_STRETCH, Math.abs(velocity) * STRETCH_FACTOR);
+      if (stretch < 0.0001) {
+        scaleX += (1 - scaleX) * RETURN_DAMPING;
+      } else {
+        scaleX += (1 + stretch - scaleX) * 0.5;
+      }
+
+      // apply transform: translate + scaleX
+      content.style.transform = `translate3d(0, ${-currentY}px, 0) scaleX(${scaleX})`;
+
+      RAF(loop);
+    }
+
+    RAF(loop);
+
+    // Recalculate on resize
+    let resizeTimer = null;
+    function onResize() {
+      if (resizeTimer) clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => {
+        refreshLayout();
+      }, 120);
+    }
+    window.addEventListener('resize', onResize, { passive: true });
+
+    // Observe content changes and refresh layout
+    const ro = new MutationObserver(() => {
+      if (resizeTimer) clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => {
+        refreshLayout();
+      }, 80);
+    });
+    try { ro.observe(content, { childList: true, subtree: true, characterData: true }); } catch (e) {}
+
+    // Public API
+    window.__t123SmoothScroll = window.__t123SmoothScroll || {};
+    window.__t123SmoothScroll.disable = function () {
+      if (!enabled) return;
+      enabled = false;
+      try { ro.disconnect(); } catch (e) {}
+      window.removeEventListener('resize', onResize);
+      // restore styles
+      document.body.style.height = original.bodyHeight;
+      content.style.position = original.contentPosition;
+      content.style.top = original.contentTop;
+      content.style.left = original.contentLeft;
+      content.style.width = original.contentWidth;
+      content.style.willChange = original.contentWillChange;
+      content.style.transformOrigin = original.contentTransformOrigin;
+      content.style.transform = '';
+      console.log('t123 Smooth Scroll disabled and original styles restored.');
+    };
+
+    window.__t123SmoothScroll.enable = function () {
+      if (enabled) return;
+      enabled = true;
+      refreshLayout();
+      lastY = currentY = window.scrollY || window.pageYOffset;
+      RAF(loop);
+      window.addEventListener('resize', onResize, { passive: true });
+      try { ro.observe(content, { childList: true, subtree: true, characterData: true }); } catch (e) {}
+      console.log('t123 Smooth Scroll re-enabled.');
+    };
+
+    // When navigating hash links, jump immediately
+    window.addEventListener('hashchange', () => {
+      currentY = targetY = window.scrollY || window.pageYOffset;
+      content.style.transform = `translate3d(0, ${-currentY}px, 0) scaleX(1)`;
+    });
+
+    // refresh after small delay to allow Tilda layout to settle
+    setTimeout(refreshLayout, 50);
+
+    console.log('t123 Smooth Scroll initialized (heavy inertia + horizontal stretch).');
+  });
+})();
