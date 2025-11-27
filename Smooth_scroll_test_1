@@ -1,7 +1,7 @@
 /**
  * t123 Smooth "Heavy" Scroll + Horizontal Stretch (wrapper-based, safe)
- * Rewritten to avoid breaking grid by moving visual DOM into a fixed overlay wrapper,
- * while keeping the original container as a spacer in the document flow.
+ * Added: robust handlers for zoom/ctrl+wheel/visualViewport resizing so layout
+ * recalculates on zoom and doesn't leave the grid broken.
  */
 (function () {
   if (window.__t123SmoothScroll && window.__t123SmoothScroll._initialized) {
@@ -28,7 +28,7 @@
       return;
     }
 
-    // Prepare state
+    // state
     let enabled = true;
     let wrapper = null;
     let moved = false;
@@ -44,7 +44,6 @@
     };
 
     function measureFullHeight() {
-      // full height of the content
       return (source === document.body)
         ? Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)
         : Math.ceil(source.scrollHeight || source.offsetHeight);
@@ -54,7 +53,6 @@
       if (wrapper) return;
       wrapper = document.createElement('div');
       wrapper.className = 't123-smooth-wrapper';
-      // basic styling; can be overridden by project CSS if necessary
       Object.assign(wrapper.style, {
         position: 'fixed',
         top: '0',
@@ -63,17 +61,17 @@
         height: 'auto',
         pointerEvents: 'auto',
         zIndex: 1,
-        willChange: 'transform'
+        willChange: 'transform',
+        transition: 'transform 0.12s linear' // small transition; will be disabled during zoom
       });
-      // insert wrapper as sibling overlaying the source (append to body to avoid clipping)
       document.body.appendChild(wrapper);
+      // expose wrapper reference for external access/disable
+      window.__t123SmoothScroll._wrapper = wrapper;
     }
 
     function moveContentToWrapper() {
       if (moved) return;
       createWrapperIfNeeded();
-      // Move all child nodes from source to wrapper
-      // Use Array.from to avoid live collection issues
       originalChildren = Array.from(source.childNodes);
       for (const node of originalChildren) {
         wrapper.appendChild(node);
@@ -83,7 +81,6 @@
 
     function moveContentBack() {
       if (!moved) return;
-      // Move back nodes in original order
       for (const node of originalChildren) {
         source.appendChild(node);
       }
@@ -92,16 +89,21 @@
       if (wrapper && wrapper.parentNode) {
         wrapper.parentNode.removeChild(wrapper);
         wrapper = null;
+        window.__t123SmoothScroll._wrapper = null;
       }
     }
 
     function refreshLayout() {
-      // measure and set spacer height so scrollbar matches content
       const fullHeight = measureFullHeight();
       source.style.height = fullHeight + 'px';
-      source.style.position = originalStyles.position || source.style.position;
-      // ensure wrapper exists and covers viewport; content moved into it is displayed
+      // ensure wrapper exists and content moved
       if (!moved) moveContentToWrapper();
+      // ensure wrapper covers viewport (in case of UI/styles)
+      if (wrapper) {
+        wrapper.style.width = '100%';
+        wrapper.style.left = '0';
+        wrapper.style.top = '0';
+      }
     }
 
     // initial move + layout
@@ -129,7 +131,6 @@
       }
 
       if (wrapper) {
-        // apply transform to wrapper: translate content visually, keep original spacer unchanged
         wrapper.style.transform = `translate3d(0, ${-currentY}px, 0) scaleX(${scaleX})`;
       }
 
@@ -138,12 +139,60 @@
 
     RAF(loop);
 
-    // Resize / mutation handling
+    // Debounce helper
+    function debounce(fn, wait) { let t; return function(...a){ clearTimeout(t); t = setTimeout(()=>fn.apply(this,a), wait); }; }
+
+    // Zoom/resize handlers: react to ctrl+wheel and visualViewport changes to refresh layout
+    const handleZoomRefresh = debounce(function () {
+      try {
+        if (wrapper) {
+          // temporarily disable transition to avoid jerkiness during zoom/resize
+          const prevTrans = wrapper.style.transition;
+          wrapper.style.transition = 'none';
+          // refresh layout (recompute spacer height & wrapper offsets)
+          refreshLayout();
+          // small tick to allow paint, then restore transition
+          setTimeout(()=>{ wrapper && (wrapper.style.transition = prevTrans || 'transform 0.12s linear'); }, 250);
+        } else {
+          refreshLayout();
+        }
+      } catch (e) {
+        console.warn('t123Smooth: error in handleZoomRefresh', e);
+      }
+    }, 160);
+
+    // wheel with ctrl (desktop zoom by wheel)
+    window.addEventListener('wheel', function (e) {
+      if (e.ctrlKey) {
+        // don't prevent default zoom on all browsers; we just observe and refresh after
+        handleZoomRefresh();
+      }
+    }, { passive: true });
+
+    // visualViewport (pinch-to-zoom / mobile) — more reliable where supported
+    if (window.visualViewport) {
+      let lastScale = window.visualViewport.scale || 1;
+      window.visualViewport.addEventListener('resize', debounce(function () {
+        const scale = window.visualViewport.scale || 1;
+        if (Math.abs(scale - lastScale) > 0.001) {
+          lastScale = scale;
+          handleZoomRefresh();
+        } else {
+          // viewport size changed (rotate, UI shown/hidden) — refresh as well
+          handleZoomRefresh();
+        }
+      }, 100));
+    }
+
+    // also refresh on normal resize/orientation
+    window.addEventListener('resize', debounce(()=>{ refreshLayout(); }, 120));
+    window.addEventListener('orientationchange', ()=>{ setTimeout(refreshLayout, 80); });
+
+    // Observe content changes and refresh layout
     let resizeTimer = null;
     function onResize() {
       if (resizeTimer) clearTimeout(resizeTimer);
       resizeTimer = setTimeout(() => {
-        // Refresh spacer height and ensure wrapper present
         refreshLayout();
       }, 120);
     }
@@ -172,13 +221,14 @@
       source.style.width = originalStyles.width;
       source.style.willChange = originalStyles.willChange;
       source.style.transformOrigin = originalStyles.transformOrigin;
+      // cleanup wrapper reference
+      try { window.__t123SmoothScroll._wrapper = null; } catch(e){}
       console.log('t123 Smooth Scroll disabled and original layout restored.');
     };
 
     window.__t123SmoothScroll.enable = function () {
       if (enabled) return;
       enabled = true;
-      // restore layout and run loop
       refreshLayout();
       lastY = currentY = window.scrollY || window.pageYOffset;
       RAF(loop);
@@ -193,9 +243,9 @@
       if (wrapper) wrapper.style.transform = `translate3d(0, ${-currentY}px, 0) scaleX(1)`;
     });
 
-    // Small delay refresh to let Tilda layout settle
+    // Small delay refresh to let layout settle
     setTimeout(refreshLayout, 60);
 
-    console.log('t123 Smooth Scroll initialized (wrapper mode). Use window.__t123SmoothScroll.disable() to revert.');
+    console.log('t123 Smooth Scroll initialized (wrapper mode) with zoom handlers. Use window.__t123SmoothScroll.disable() to revert.');
   });
 })();
